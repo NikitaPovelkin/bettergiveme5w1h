@@ -54,7 +54,7 @@ class ActionExtractor(AbsExtractor):
 
         if not candidates:
             self.candidates_found_from_tree = False
-            for pattern in self._evaluate_tree(trees[0]):
+            for pattern in self._evaluate_tree(trees[0]):  # First sentence evaluated
                 candidate_object = Candidate()
                 candidate_object.set_sentence_index(pattern[2])
                 candidate_object.set_raw([pattern[0], pattern[1]])
@@ -75,40 +75,6 @@ class ActionExtractor(AbsExtractor):
         """
 
         candidates = []
-
-        # if not self.candidates_found_from_tree:
-        #     inspected_tree = sentence_root
-        #     next_level_of_tree = inspected_tree[0]
-        #     while not isinstance(next_level_of_tree[0][0], dict):
-        #         inspected_tree = next_level_of_tree
-        #         next_level_of_tree = inspected_tree[0]
-        #
-        #     possible_candidates = inspected_tree
-        #
-        #     candidates_subtree_labels = []
-        #     possible_candidate = {}
-        #
-        #     for idx, each in enumerate(possible_candidates):
-        #         labels = []
-        #         if not isinstance(each[0], dict):
-        #             labels = [True for subtree in each if subtree.label() == "NNP"]
-        #
-        #         candidates_subtree_labels.append(labels)
-        #         possible_candidate[idx] = each
-        #
-        #     candidate_idx = 0
-        #     most_nnps = 0
-        #     for idx, each in enumerate(candidates_subtree_labels):
-        #         candidate_idx = idx if len(each) > most_nnps else candidate_idx
-        #         most_nnps = max(most_nnps, len(each))
-        #
-        #     candidate = possible_candidate[candidate_idx]
-        #     sibling = candidate.right_sibling()
-        #
-        #     candidates.append([candidate.pos(), self.cut_what(sibling, self._minimal_length_of_tokens).pos(),
-        #                          sentence_root.stanfordCoreNLPResult['index']])
-        #     return candidates
-
         for subtree in sentence_root.subtrees():
             if subtree.label() == 'NP' and subtree.parent().label() == 'S':
 
@@ -122,8 +88,10 @@ class ActionExtractor(AbsExtractor):
                     if sibling.label() == 'VP':
                         # this gives a tuple to find the way from sentence to leaf
                         # tree_position = subtree.leaf_treeposition(0)
-                        entry = [self.cut_what(subtree, self._minimal_length_of_tokens).pos(), self.cut_what(sibling, self._minimal_length_of_tokens).pos(),
+                        entry = [self.cut_who(subtree).pos(),
+                                 self.cut_what(sibling, self._minimal_length_of_tokens).pos(),
                                  sentence_root.stanfordCoreNLPResult['index']]
+
                         candidates.append(entry)
                         break
                     sibling = sibling.right_sibling()
@@ -132,122 +100,123 @@ class ActionExtractor(AbsExtractor):
             for subtree in sentence_root.subtrees():
                 if subtree.label() == 'NP':
                     if subtree.right_sibling():
-                        entry = [self.cut_what(subtree, self._minimal_length_of_tokens).pos(), self.cut_what(subtree.right_sibling(), self._minimal_length_of_tokens).pos(),
-                                 sentence_root.stanfordCoreNLPResult['index']]
+                        entry = [self.cut_who(subtree).pos(), self.cut_what(subtree.right_sibling(),
+                                 self._minimal_length_of_tokens).pos(), sentence_root.stanfordCoreNLPResult['index']]
                         candidates.append(entry)
 
         return candidates
 
     def _evaluate_candidates(self, document):
-            """
-            Calculate a confidence score based on number of mentions, position in text and entailment of named entities
-            for extracted candidates.
+        """
+        Calculate a confidence score based on number of mentions, position in text and entailment of named entities
+        for extracted candidates.
 
-            :param document: The parsed document
-            :type document: Document
-            :param candidates: Extracted candidates to evaluate.
-            :type candidates:[([(String,String)], ([(String,String)])]
-            :return: A list of evaluated and ranked candidates
-            """
-            ranked_candidates = []
-            doc_len = document.get_len()
-            doc_ner = document.get_ner()
-            doc_coref = document.get_corefs()
+        :param document: The parsed document
+        :type document: Document
+        :param candidates: Extracted candidates to evaluate.
+        :type candidates:[([(String,String)], ([(String,String)])]
+        :return: A list of evaluated and ranked candidates
+        """
+        ranked_candidates = []
+        doc_len = document.get_len()
+        doc_ner = document.get_ner()
+        doc_coref = document.get_corefs()
 
-            if not self.candidates_found_from_tree:
-                who = [(document.get_candidates(self.get_id())[0].get_raw()[0], 1.0, 0)]
-                what = [(document.get_candidates(self.get_id())[0].get_raw()[1], 1.0, 0)]
-
-                # Transform who to object oriented list
-                o_who = self._filterAndConvertToObjectOrientedList(who)
-                document.set_answer('who', o_who)
-
-                # Transform who to object oriented list
-                o_what = self._filterAndConvertToObjectOrientedList(what)
-                document.set_answer('what', o_what)
-
-                return
-
-            if any(doc_coref.values()):
-                # get length of longest coref chain for normalization
-                max_len = len(max(doc_coref.values(), key=len))
-            else:
-                max_len = 1
-
-            for candidate in document.get_candidates(self.get_id()):
-                candidateParts = candidate.get_raw()
-                verb = candidateParts[1][0][0]['nlpToken']['originalText'].lower()
-
-                # VP beginning with say/said often contain no relevant action and are therefor skipped.
-                if verb.startswith('say') or verb.startswith('said'):
-                    continue
-
-                coref_chain = doc_coref[candidateParts[2]]
-
-                # first parameter used for ranking is the number of mentions, we use the length of the coref chain
-                score = (len(coref_chain) / max_len) * self.weights[1]
-
-                representative = None
-                contains_ne = False
-                mention_type = ''
-
-                for mention in coref_chain:
-                    if mention['id'] == candidateParts[3]:
-                        mention_type = mention['type']
-                        if mention['sentNum'] < doc_len:
-                            # The position (sentence number) is another important parameter for scoring.
-                            # This is inspired by the inverted pyramid.
-                            score += ((doc_len - mention['sentNum'] + 1) / doc_len) * self.weights[0]
-                    if mention['isRepresentativeMention']:
-                        # The representative name for this chain has been found.
-                        tmp = document._sentences[mention['sentNum'] - 1]['tokens'][mention['headIndex'] - 1]
-                        representative = ((tmp['originalText'], tmp), tmp['pos'])
-
-
-                        try:
-                            # these dose`t work, if some special characters are present
-                            if representative[-1][1] == 'POS':
-                                representative = representative[:-1]
-                        except IndexError:
-                            pass
-
-                    if not contains_ne:
-                        # If the current mention doesn't contain a named entity, check the other members of the chain
-                        for token in doc_ner[mention['sentNum'] - 1][mention['headIndex'] - 1:mention['endIndex'] - 1]:
-                            if token[1] in ['PERSON', 'ORGANIZATION', 'LOCATION']:
-                                contains_ne = True
-                                break
-
-                if contains_ne:
-                    # the last important parameter is the entailment of a named entity
-                    score += self.weights[2]
-
-                if score > 0:
-                    # normalize the scoring
-                    score /= sum(self.weights)
-
-                if mention_type == 'PRONOMINAL':
-                    # use representing mention if the agent is only a pronoun
-                    rp_format_fix = [(({'nlpToken': representative[0][1]}, representative[0][1]['pos']))]
-                    ranked_candidates.append((rp_format_fix, candidateParts[1], score, candidate.get_sentence_index()))
-                else:
-                    ranked_candidates.append((candidateParts[0], candidateParts[1], score, candidate.get_sentence_index()))
-
-            # split results
-            who = [(c[0], c[2], c[3]) for c in ranked_candidates]
-            what = [(c[1], c[2], c[3]) for c in ranked_candidates]
+        if not self.candidates_found_from_tree:
+            candidates = document.get_candidates(self.get_id()) # get_candidates(self.get_id()) - all candidates, get_raw() = who + what
+            best_candidate = self.rate_who_(candidates)[0][1]
+            who = [(best_candidate.get_raw()[0], 1.0, 0)]
+            what = [(best_candidate.get_raw()[1], 1.0, 0)]
 
             # Transform who to object oriented list
             o_who = self._filterAndConvertToObjectOrientedList(who)
-            # Filter by text
-            o_who_clean = self._filter_candidate_dublicates(o_who)
-            document.set_answer('who', o_who_clean)
+            document.set_answer('who', o_who)
 
             # Transform who to object oriented list
             o_what = self._filterAndConvertToObjectOrientedList(what)
-            # Filter by text
-            o_what_clean = self._filter_candidate_dublicates(o_what)
-            document.set_answer('what', o_what_clean)
+            document.set_answer('what', o_what)
+
+            return
+
+        if any(doc_coref.values()):
+            # get length of longest coref chain for normalization
+            max_len = len(max(doc_coref.values(), key=len))
+        else:
+            max_len = 1
+
+        for candidate in document.get_candidates(self.get_id()):
+            candidateParts = candidate.get_raw()
+            verb = candidateParts[1][0][0]['nlpToken']['originalText'].lower()
+
+            # VP beginning with say/said often contain no relevant action and are therefor skipped.
+            if verb.startswith('say') or verb.startswith('said'):
+                continue
+
+            coref_chain = doc_coref[candidateParts[2]]
+
+            # first parameter used for ranking is the number of mentions, we use the length of the coref chain
+            score = (len(coref_chain) / max_len) * self.weights[1]
+
+            representative = None
+            contains_ne = False
+            mention_type = ''
+
+            for mention in coref_chain:
+                if mention['id'] == candidateParts[3]:
+                    mention_type = mention['type']
+                    if mention['sentNum'] < doc_len:
+                        # The position (sentence number) is another important parameter for scoring.
+                        # This is inspired by the inverted pyramid.
+                        score += ((doc_len - mention['sentNum'] + 1) / doc_len) * self.weights[0]
+                if mention['isRepresentativeMention']:
+                    # The representative name for this chain has been found.
+                    tmp = document._sentences[mention['sentNum'] - 1]['tokens'][mention['headIndex'] - 1]
+                    representative = ((tmp['originalText'], tmp), tmp['pos'])
+
+                    try:
+                        # these dose`t work, if some special characters are present
+                        if representative[-1][1] == 'POS':
+                            representative = representative[:-1]
+                    except IndexError:
+                        pass
+
+                if not contains_ne:
+                    # If the current mention doesn't contain a named entity, check the other members of the chain
+                    for token in doc_ner[mention['sentNum'] - 1][mention['headIndex'] - 1:mention['endIndex'] - 1]:
+                        if token[1] in ['PERSON', 'ORGANIZATION', 'LOCATION']:
+                            contains_ne = True
+                            break
+
+            if contains_ne:
+                # the last important parameter is the entailment of a named entity
+                score += self.weights[2]
+
+            if score > 0:
+                # normalize the scoring
+                score /= sum(self.weights)
+
+            if mention_type == 'PRONOMINAL':
+                # use representing mention if the agent is only a pronoun
+                rp_format_fix = [(({'nlpToken': representative[0][1]}, representative[0][1]['pos']))]
+                ranked_candidates.append((rp_format_fix, candidateParts[1], score, candidate.get_sentence_index()))
+            else:
+                ranked_candidates.append((candidateParts[0], candidateParts[1], score, candidate.get_sentence_index()))
+
+        # split results
+        who = [(c[0], c[2], c[3]) for c in ranked_candidates]
+        what = [(c[1], c[2], c[3]) for c in ranked_candidates]
+
+        # Transform who to object oriented list
+        o_who = self._filterAndConvertToObjectOrientedList(who)
+        # Filter by text
+        o_who_clean = self._filter_candidate_dublicates(o_who)
+        document.set_answer('who', o_who_clean)
+
+        # Transform who to object oriented list
+        o_what = self._filterAndConvertToObjectOrientedList(what)
+        # Filter by text
+        o_what_clean = self._filter_candidate_dublicates(o_what)
+        document.set_answer('what', o_what_clean)
 
     def _filterAndConvertToObjectOrientedList(self, list):
         max = 0
@@ -295,3 +264,64 @@ class ActionExtractor(AbsExtractor):
                         children.append(sibling.copy(deep=True))
                     break
             return ParentedTree(tree.label(), children)
+
+    def cut_who(self, tree):
+        if isinstance(tree[0][0], dict):
+            return tree
+
+        children = self.return_all_np_subtrees_of(tree)
+
+        if not children:
+            return self.cut_what(tree)
+
+        person_ner_sum = []
+        trees_sizes = []
+        for each in children:
+            trees_sizes.append(len(each.pos()))
+            person_ner_sum.append(self.count_persons(each))
+
+        indices = [index for index, item in enumerate(person_ner_sum) if item == max(person_ner_sum)]
+        if len(indices) > 1:
+            shortest_np_index = self.find_index_of_shortest_tree(trees_sizes, indices)
+        else:
+            shortest_np_index = indices[0]
+
+        return children[shortest_np_index]
+
+    def find_index_of_shortest_tree(self, tree_sizes, indices):
+        return tree_sizes.index(min(list(map(tree_sizes.__getitem__, indices))))
+
+    def return_all_np_subtrees_of(self, tree):
+        subtrees = []
+        for each in tree:
+            if each.label() == 'NP':
+                subtrees.append(each)
+                subtrees += self.return_all_np_subtrees_of(each)
+
+        return subtrees
+
+    def count_persons(self, obj):
+        count = 0
+        if isinstance(obj, dict):
+            if obj['nlpToken']['ner'] == 'PERSON':
+                return 3
+            elif obj['nlpToken']['ner'] == 'TITLE':
+                return 2
+            elif obj['nlpToken']['ner'] == 'ORGANIZATION':
+                return 1
+        else:
+            for each in obj:
+                count += self.count_persons(each)
+        return count
+
+    def rate_who_(self, candidates):
+        ranked_candidates = []
+        for candidate in candidates:
+            cand_score = 0
+            who_candidate = candidate.get_raw()[0]
+            for each in who_candidate:
+                cand_score += self.count_persons(each[0])
+            ranked_candidates.append((cand_score, candidate))
+
+        ranked_candidates.sort(key=lambda a: a[0], reverse=True)
+        return ranked_candidates
