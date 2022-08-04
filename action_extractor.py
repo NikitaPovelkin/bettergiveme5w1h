@@ -52,6 +52,7 @@ class ActionExtractor(AbsExtractor):
 
                         candidates.append(candidate_object)
 
+        # If no candidates or no corefs found, evaluate first sentence
         if not candidates:
             self.candidates_found_from_tree = False
             for pattern in self._evaluate_tree(trees[0]):  # First sentence evaluated
@@ -96,6 +97,7 @@ class ActionExtractor(AbsExtractor):
                         break
                     sibling = sibling.right_sibling()
 
+        # If sentence has no NP-VP-NP Pattern, all NP Trees are considered as candidates
         if not candidates:
             for subtree in sentence_root.subtrees():
                 if subtree.label() == 'NP':
@@ -122,8 +124,12 @@ class ActionExtractor(AbsExtractor):
         doc_ner = document.get_ner()
         doc_coref = document.get_corefs()
 
+        """
+        Candidates evaluation done in case of no corefs. 
+        Shortened candidates are rated and afterwards saved.
+        """
         if not self.candidates_found_from_tree:
-            candidates = document.get_candidates(self.get_id()) # get_candidates(self.get_id()) - all candidates, get_raw() = who + what
+            candidates = document.get_candidates(self.get_id())
             best_candidate = self.rate_who_(candidates)[0][1]
             who = [(best_candidate.get_raw()[0], 1.0, 0)]
             what = [(best_candidate.get_raw()[1], 1.0, 0)]
@@ -132,12 +138,13 @@ class ActionExtractor(AbsExtractor):
             o_who = self._filterAndConvertToObjectOrientedList(who)
             document.set_answer('who', o_who)
 
-            # Transform who to object oriented list
+            # Transform what to object oriented list
             o_what = self._filterAndConvertToObjectOrientedList(what)
             document.set_answer('what', o_what)
 
             return
 
+        # Standard scoring done by initial giveme5w1h
         if any(doc_coref.values()):
             # get length of longest coref chain for normalization
             max_len = len(max(doc_coref.values(), key=len))
@@ -266,41 +273,64 @@ class ActionExtractor(AbsExtractor):
             return ParentedTree(tree.label(), children)
 
     def cut_who(self, tree):
+        """
+        This function is used to shorten who candidates.
+
+        :param tree: Tree to cut
+        :type tree: ParentedTree
+
+        :return: A subtree
+        """
         if isinstance(tree[0][0], dict):
             return tree
 
-        children = self.return_all_np_subtrees_of(tree)
+        possible_answers = self.return_all_np_subtrees_of(tree)
 
-        if not children:
+        # In case tree has no NP-children
+        if not possible_answers:
             return self.cut_what(tree)
 
-        person_ner_sum = []
-        trees_sizes = []
-        for each in children:
-            trees_sizes.append(len(each.pos()))
-            person_ner_sum.append(self.count_persons(each))
+        # Important NEs: Person, Title, Organization
+        important_ner_counts_in_answers = []
+        possible_answers_sizes = []
 
-        indices = [index for index, item in enumerate(person_ner_sum) if item == max(person_ner_sum)]
+        for each in possible_answers:
+            possible_answers_sizes.append(len(each.pos()))
+            important_ner_counts_in_answers.append(self.count_ners_in_(each))
+
+        # Indices of possible answers with highest important NE count
+        indices = [index for index, item in enumerate(important_ner_counts_in_answers) if item == max(important_ner_counts_in_answers)]
         if len(indices) > 1:
-            shortest_np_index = self.find_index_of_shortest_tree(trees_sizes, indices)
+            shortest_np_index = self.find_index_of_shortest_tree(possible_answers_sizes, indices)
         else:
             shortest_np_index = indices[0]
 
-        return children[shortest_np_index]
+        return possible_answers[shortest_np_index]
 
     def find_index_of_shortest_tree(self, tree_sizes, indices):
         return tree_sizes.index(min(list(map(tree_sizes.__getitem__, indices))))
 
     def return_all_np_subtrees_of(self, tree):
-        subtrees = []
+        possible_answer = []
+
+        # If candidate is short, take into account as answer
+        if len(tree.pos()) <= 5 and tree.label() == 'NP':
+            possible_answer.append(tree)
+
+        # Recursively add all NP trees to possible answer list
         for each in tree:
             if each.label() == 'NP':
-                subtrees.append(each)
-                subtrees += self.return_all_np_subtrees_of(each)
+                possible_answer.append(each)
+                possible_answer += self.return_all_np_subtrees_of(each)
 
-        return subtrees
+        return possible_answer
 
-    def count_persons(self, obj):
+    def count_ners_in_(self, obj):
+        """
+        Returns score of an object, tree, based on NE
+        :param obj: tree
+        :return: score
+        """
         count = 0
         if isinstance(obj, dict):
             if obj['nlpToken']['ner'] == 'PERSON':
@@ -311,16 +341,21 @@ class ActionExtractor(AbsExtractor):
                 return 1
         else:
             for each in obj:
-                count += self.count_persons(each)
+                count += self.count_ners_in_(each)
         return count
 
     def rate_who_(self, candidates):
+        """
+        Function for ranking candidates based on the amount of NEs
+        :param: candidates
+        :return ranked candidates
+        """
         ranked_candidates = []
         for candidate in candidates:
             cand_score = 0
             who_candidate = candidate.get_raw()[0]
             for each in who_candidate:
-                cand_score += self.count_persons(each[0])
+                cand_score += self.count_ners_in_(each[0])
             ranked_candidates.append((cand_score, candidate))
 
         ranked_candidates.sort(key=lambda a: a[0], reverse=True)
